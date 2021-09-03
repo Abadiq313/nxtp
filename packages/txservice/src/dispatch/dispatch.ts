@@ -1,21 +1,29 @@
 import { BigNumber, Signer } from "ethers";
 import PriorityQueue from "p-queue";
-import { createLoggingContext, delay, jsonifyError, Logger, mkAddress, RequestContext } from "@connext/nxtp-utils";
+import { createLoggingContext, delay, jsonifyError, Logger, mkAddress, NxtpError, RequestContext } from "@connext/nxtp-utils";
 
 import { Gas, WriteTransaction } from "../types";
-import { AlreadyMined, TransactionReplaced, TransactionReverted } from "../error";
+import { AlreadyMined, TimeoutError, TransactionReplaced, TransactionReverted } from "../error";
 import { ChainConfig, TransactionServiceConfig } from "../config";
 
 import { ChainRpcProvider } from "./provider";
 import { Transaction } from "./transaction";
 import { TransactionBuffer } from "./buffer";
 
+export type TransactionEventCallbacks = {
+  onCreate: (tx: Transaction) => void;
+  onSubmit: (tx: Transaction) => void;
+  onBump: (tx: Transaction) => void;
+  onConfirm: (tx: Transaction) => void;
+  onFail: (tx: Transaction, error: NxtpError) => void;
+}
+
 /**
  * @classdesc Wraps and monitors transaction queue; handles transactions' initial creation and nonce assignment.
  *
  * All transactions created through txservice must go through here.
  */
-export class TransactionDispatch extends ChainRpcProvider {
+export class TransactionDispatch {
   // This queue is used for creation of Transactions - specifically, for assigning nonce.
   private readonly queue: PriorityQueue = new PriorityQueue({ concurrency: 1 });
   // Buffer for monitoring transactions locally. Enables us to perform lookback and ensure all of them get through.
@@ -49,14 +57,14 @@ export class TransactionDispatch extends ChainRpcProvider {
    * configuration.
    */
   constructor(
-    logger: Logger,
     signer: string | Signer,
     public readonly chainId: number,
     chainConfig: ChainConfig,
     config: TransactionServiceConfig,
+    public readonly callbacks: TransactionEventCallbacks,
     startMonitor = true,
   ) {
-    super(logger, signer, chainId, chainConfig, config);
+    // super(logger, signer, chainId, chainConfig, config);
     // A separate loop will make sure they get through or get backfilled.
     if (startMonitor) {
       this.startMonitor();
@@ -80,10 +88,112 @@ export class TransactionDispatch extends ChainRpcProvider {
    * continue monitoring, thus enabling us to further ensure they all go through.
    *
    * @param minTx - Minimum transaction params needed to form a transaction for sending.
+   * @param context - Request context.
    *
    * @returns Transaction instance with populated params, ready for submit.
    */
-  public async createTransaction(minTx: WriteTransaction, context: RequestContext): Promise<Transaction> {
+  public async sendTransaction(minTx: WriteTransaction, context: RequestContext) {
+    const transaction = await this.createTransaction(minTx, context);
+
+    try {
+      while (!transaction.didFinish) {
+        // Submit: send to chain.
+        try {
+          // await transaction.submit();
+          this.rpc.send(transaction);
+          this.callbacks.onSubmit(transaction);
+          // await this.submitTransaction(transaction, requestContext);
+        } catch (error) {
+          if (error.type === AlreadyMined.type) {
+            if (transaction.attempt === 1) {
+              // A transaction that's only been attempted once has an expired nonce. This means that TransactionMonitor
+              // assigned us a bunk (already used) nonce.
+
+              // TODO: In this event, we need to go back to the beginning and actually "recreate" the transaction
+              // itself now. Assuming our nonce tracker (TransactionMonitor) is effective, this should normally never occur...
+              // but there is at least 1 legit edge case: if the TransactionMonitor has just come online and is can only rely on
+              // the provider's TransactionCount to assign nonce - and the provider turns out to be incorrect (e.g. off by 1 or 2
+              // pending tx's not in its mempool yet for some reason).
+              // So we may want to replace this throw with a recreate.
+              throw error;
+            }
+            // Otherwise if attempts > 1, we ignore this error and proceed to validation step on the assumption that our prev tx
+            // got confirmed.
+          } else {
+            throw error;
+          }
+        }
+
+        // Validate: wait for 1 confirmation.
+        try {
+          // await transaction.validate();
+        } catch (error) {
+          // this.logger.debug(
+          //   `Transaction validation step: received ${error.type} error.`,
+          //   requestContext,
+          //   methodContext,
+          //   { id: transaction.id, attempt: transaction.attempt, error: jsonifyError(error) },
+          // );
+          if (error.type === TimeoutError.type) {
+            // Transaction timed out trying to validate. We should bump the tx and submit again.
+            // this.logger.debug(`Bumping transaction gas price for resubmit.`, requestContext, methodContext, {
+            //   id: transaction.id,
+            // });
+            
+            transaction.bumpGasPrice();
+            this.callbacks.onBump(transaction);
+            continue;
+          } else {
+            throw error;
+          }
+        }
+
+        // Confirm: get target # confirmations.
+        try {
+          // await this.confirmTransaction(transaction, requestContext);
+          this.callbacks.onConfirm(transaction);
+          break;
+        } catch (error) {
+          // this.logger.debug(
+          //   `Transaction confirmation step: received ${error.type} error`,
+          //   requestContext,
+          //   methodContext,
+          //   { id: transaction.id, attempt: transaction.attempt, error: jsonifyError(error) },
+          // );
+          if (error.type === TimeoutError.type) {
+            // Transaction timed out trying to confirm. This implies a re-org has happened. We should attempt to resubmit.
+            // this.logger.warn(
+            //   "Transaction timed out waiting for target confirmations. A possible re-org has occurred; resubmitting transaction.",
+            //   requestContext,
+            //   methodContext,
+            //   { id: transaction.id },
+            // );
+            continue;
+          } else {
+            throw error;
+          }
+        }
+      }
+    } catch (error) {
+      // this.handleFail(error, transaction, requestContext);
+      callbacks.onFail(transaction, error);
+      throw error;
+    }
+
+    return transaction.receipt!;
+  }
+
+  /**
+   * This will create a transaction with an assigned nonce as well as estimated gas / set gas price.
+   * We use this structure to essentially enforce all created transactions are saved locally in the buffer for
+   * continue monitoring, thus enabling us to further ensure they all go through.
+   *
+   * @param minTx - Minimum transaction params needed to form a transaction for sending.
+   * @param context - Request context.
+   *
+   * @returns Transaction instance with populated params, ready for submit.
+   */
+  private async createTransaction(minTx: WriteTransaction, context: RequestContext): Promise<Transaction> {
     // Make sure we haven't aborted dispatch.
     this.assertNotAborted();
     // Estimate gas here will throw if the transaction is going to revert on-chain for "legit" reasons. This means
@@ -96,7 +206,7 @@ export class TransactionDispatch extends ChainRpcProvider {
         // NOTE: This call must be here, serialized within the queue, as it is dependent on current pending transaction count.
         const nonce = await this.getNonce();
         // Create a new transaction instance to track lifecycle. We will NOT be submitting here.
-        const transaction = new Transaction(this.logger, this, minTx, nonce, gas, undefined, context);
+        const transaction = Transaction.create(this.logger, minTx, nonce, gas, undefined, context);
         this.buffer.insert(nonce, transaction);
         this.incrementNonce();
         return { value: transaction, success: true };
@@ -125,7 +235,7 @@ export class TransactionDispatch extends ChainRpcProvider {
    */
   private async getNonce(): Promise<number> {
     const buffer = (this.buffer.getLastNonce() ?? -1) + 1;
-    const result = await this.getTransactionCount();
+    const result = await this.rpc.getTransactionCount();
     if (result.isErr()) {
       throw result.error;
     }
@@ -172,7 +282,7 @@ export class TransactionDispatch extends ChainRpcProvider {
       await delay(TransactionDispatch.MONITOR_POLL_PARITY);
       return;
     }
-    const result = await this.getTransactionCount();
+    const result = await this.rpc.getTransactionCount();
     if (result.isErr()) {
       this.logger.error(`Failed to get transaction count`, requestContext, methodContext, jsonifyError(result.error));
       // TODO: If we keep getting failures due to RPC issue, escape out?

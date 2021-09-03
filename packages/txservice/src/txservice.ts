@@ -119,93 +119,7 @@ export class TransactionService {
     });
 
     const transaction = await this.getProvider(tx.chainId).createTransaction(tx, requestContext);
-    try {
-      while (!transaction.didFinish) {
-        // Submit: send to chain.
-        try {
-          await this.submitTransaction(transaction, requestContext);
-        } catch (error) {
-          this.logger.debug(`Transaction submit step: received ${error.type} error.`, requestContext, methodContext, {
-            id: transaction.id,
-            attempt: transaction.attempt,
-            error: jsonifyError(error),
-          });
-          if (error.type === AlreadyMined.type) {
-            if (transaction.attempt === 1) {
-              // A transaction that's only been attempted once has an expired nonce. This means that TransactionMonitor
-              // assigned us a bunk (already used) nonce.
-
-              // TODO: In this event, we need to go back to the beginning and actually "recreate" the transaction
-              // itself now. Assuming our nonce tracker (TransactionMonitor) is effective, this should normally never occur...
-              // but there is at least 1 legit edge case: if the TransactionMonitor has just come online and is can only rely on
-              // the provider's TransactionCount to assign nonce - and the provider turns out to be incorrect (e.g. off by 1 or 2
-              // pending tx's not in its mempool yet for some reason).
-              // So we may want to replace this throw with a recreate.
-              throw error;
-            } else {
-              // Ignore this error, proceed to validation step.
-              this.logger.debug("Continuing to confirmation step.", requestContext, methodContext, {
-                id: transaction.id,
-              });
-            }
-          } else {
-            throw error;
-          }
-        }
-
-        // Validate: wait for 1 confirmation.
-        try {
-          await transaction.validate();
-        } catch (error) {
-          this.logger.debug(
-            `Transaction validation step: received ${error.type} error.`,
-            requestContext,
-            methodContext,
-            { id: transaction.id, attempt: transaction.attempt, error: jsonifyError(error) },
-          );
-          if (error.type === TimeoutError.type) {
-            // Transaction timed out trying to validate. We should bump the tx and submit again.
-            this.logger.debug(`Bumping transaction gas price for resubmit.`, requestContext, methodContext, {
-              id: transaction.id,
-            });
-            transaction.bumpGasPrice();
-            continue;
-          } else {
-            throw error;
-          }
-        }
-
-        // Confirm: get target # confirmations.
-        try {
-          await this.confirmTransaction(transaction, requestContext);
-          break;
-        } catch (error) {
-          this.logger.debug(
-            `Transaction confirmation step: received ${error.type} error`,
-            requestContext,
-            methodContext,
-            { id: transaction.id, attempt: transaction.attempt, error: jsonifyError(error) },
-          );
-          if (error.type === TimeoutError.type) {
-            // Transaction timed out trying to confirm. This implies a re-org has happened. We should attempt to resubmit.
-            this.logger.warn(
-              "Transaction timed out waiting for target confirmations. A possible re-org has occurred; resubmitting transaction.",
-              requestContext,
-              methodContext,
-              { id: transaction.id },
-            );
-            continue;
-          } else {
-            throw error;
-          }
-        }
-      }
-    } catch (error) {
-      this.handleFail(error, transaction, requestContext);
-      throw error;
-    }
-
-    return transaction.receipt!;
+    
   }
 
   /**
@@ -402,7 +316,7 @@ export class TransactionService {
       id: transaction.id,
       attempt: transaction.attempt,
     });
-    const response = await transaction.submit();
+    
     const gas = response.gasPrice ?? transaction.params.gasPrice;
     this.logger.info(`Tx submitted.`, requestContext, methodContext, {
       id: transaction.id,
