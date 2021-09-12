@@ -6,6 +6,7 @@ import {
   RequestContextWithTransactionId,
   safeJsonStringify,
 } from "@connext/nxtp-utils";
+import { Queue } from "bull";
 
 import { getContext } from "../../router";
 import {
@@ -20,12 +21,34 @@ import { ContractReaderNotAvailableForChain } from "../../lib/errors";
 
 const LOOP_INTERVAL = 15_000;
 export const getLoopInterval = () => LOOP_INTERVAL;
+const QUEUE_CONCURRENCY = 25;
 
 export const handlingTracker: Map<string, TCrosschainTransactionStatus> = new Map();
 
+const queues: Record<number, Queue<ActiveTransaction<any>>> = {};
+
 export const bindContractReader = async () => {
-  const { contractReader, logger } = getContext();
+  const { contractReader, logger, config, queueManager } = getContext();
   const { requestContext, methodContext } = createLoggingContext("bindContractReader");
+
+  Object.keys(config.chainConfig).forEach((cId) => {
+    const queue = queueManager.createQueue<ActiveTransaction<any>>(cId);
+    queue.process(QUEUE_CONCURRENCY, async (transaction) => {
+      console.log("********* transaction: ", transaction);
+
+      // console.log("transaction: ", transaction);
+      // const { requestContext, methodContext } = createLoggingContext(
+      //   `${bindContractReader.name}-${transaction.data.status}`,
+      //   undefined,
+      //   transaction.data.crosschainTx.invariant.transactionId,
+      // );
+      // logger.info("Processing transaction from queue", requestContext, methodContext, { transaction });
+      // await handleSingle(transaction.data, requestContext);
+      // logger.info("Finished transaction from queue", requestContext, methodContext, { transaction });
+    });
+    queues[Number(cId)] = queue;
+  });
+
   setInterval(async () => {
     let transactions: ActiveTransaction<any>[] = [];
     try {
@@ -41,7 +64,26 @@ export const bindContractReader = async () => {
       logger.error("Error getting active txs, waiting for next loop", requestContext, methodContext, jsonifyError(err));
       return;
     }
-    await handleActiveTransactions(transactions);
+    await Promise.all(
+      transactions.map(async (transaction) => {
+        let queue: Queue<ActiveTransaction<any>>;
+        if ([CrosschainTransactionStatus.SenderPrepared].includes(transaction.status)) {
+          // queue on receiver chain
+          queue = queues[transaction.crosschainTx.invariant.receivingChainId];
+        } else {
+          // queue on sender chain
+          queue = queues[transaction.crosschainTx.invariant.receivingChainId];
+        }
+        logger.info("Adding transaction to queue", requestContext, methodContext, {
+          jobId: transaction.crosschainTx.invariant.transactionId,
+        });
+        await queue.add(transaction, { jobId: transaction.crosschainTx.invariant.transactionId, delay: 750 });
+        logger.info("Added transaction to queue", requestContext, methodContext, {
+          jobId: transaction.crosschainTx.invariant.transactionId,
+        });
+      }),
+    );
+    // await handleActiveTransactions(transactions);
   }, getLoopInterval());
 };
 

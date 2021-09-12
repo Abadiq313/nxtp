@@ -88,6 +88,7 @@ export const NxtpRouterConfigSchema = Type.Object({
   host: Type.String({ format: "ipv4" }),
   cleanUpMode: Type.Boolean(),
   diagnosticMode: Type.Boolean(),
+  redisUrl: Type.String({ format: "uri" }),
 });
 
 export type NxtpRouterConfig = Static<typeof NxtpRouterConfigSchema>;
@@ -165,6 +166,7 @@ export const getEnvConfig = (crossChainData: Map<string, any> | undefined): Nxtp
     host: process.env.NXTP_HOST || configJson.host || configFile.host || "0.0.0.0",
     cleanUpMode: process.env.NXTP_CLEAN_UP_MODE || configJson.cleanUpMode || configFile.cleanUpMode || false,
     diagnosticMode: process.env.NXTP_DIAGNOSTIC_MODE || configJson.diagnosticMode || configFile.diagnosticMode || false,
+    redisUrl: process.env.NXTP_REDIS_URL || configJson.redisUrl || configFile.redisUrl,
   };
 
   const overridechainRecommendedConfirmations = configFile.overridechainRecommendedConfirmations;
