@@ -15,9 +15,9 @@
     }
   },
   "logLevel": "info",
-  "natsUrl": "nats://172.17.0.1:4222",
-  "authUrl": "http://172.17.0.1:5040",
-  "web3SignerUrl": "http://172.17.0.1:9000",
+  "natsUrl": "nats://nats-test:4222",
+  "authUrl": "http://auth-test:5040",
+  "web3SignerUrl": "http://web3signer-test:9000",
   "swapPools": [
     {
       "name": "TEST",

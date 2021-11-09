@@ -115,7 +115,7 @@ yarn workspace @connext/nxtp-integration docker:web3signer:up
 To run the router with this test integration instance of web3signer, add to the router config:
 
 ```
-"web3SignerUrl": "http://0.0.0.0:9000"
+"web3SignerUrl": "http:/web3signer-test:9000"
 ```
 
 Remove the "mnemonic" entry from the config if you have one. Make sure the docker instance is running and web3signer is reachable.
