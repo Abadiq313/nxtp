@@ -2,6 +2,9 @@
 
 ## Next Release
 
+- [txservice] error types
+- [utils] subgraph health query method implementation
+
 # 0.0.99
 
 - [txservice] Fix error parsing
