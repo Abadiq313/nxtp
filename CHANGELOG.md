@@ -5,6 +5,12 @@
 - [txservice] error types
 - [utils] subgraph health query method implementation
 
+# 0.0.100
+
+- [router] Cleanup prometheus collection
+- [router/txservice] Explicitly use legacy transactions only
+- [router] Fix mainnet equivalent
+
 # 0.0.99
 
 - [txservice] Fix error parsing
